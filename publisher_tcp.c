@@ -2,8 +2,8 @@
 #include<string.h>
 #include<stdlib.h>
 #include<time.h>
-#include<netinet/in.h>
 #include<syscall.h>
+#include<netinet/in.h>
 #include<unistd.h>
 #include <arpa/inet.h>
 
@@ -13,28 +13,32 @@ char* creadorMensaje(char equipo1,char equipo2){
     int x = rand() % 7;
     int y = rand() % 20;
     int z = rand() % 20;
+    char header[3];
+    header[0] = equipo1;
+    header[1] = equipo2;
+    header[2] = '\0';
 
     switch(x){
         case 0:
-            snprintf(mensajecompleto,100,"Gol de %c al equipo %c",equipo1,equipo2);
+            snprintf(header, 100, "Gol de %c al equipo %c", equipo1, equipo2);
             break;
         case 1:
-            snprintf(mensajecompleto,100,"Gol de %c al equipo %c",equipo2,equipo1 );
+            snprintf(header, 100, "Gol de %c al equipo %c", equipo2, equipo1);
             break;
         case 2:
-            snprintf(mensajecompleto,100,"Cambio: jugador %d entra por %d",y,z);
+            snprintf(header,100,"Cambio: jugador %d entra por %d",y,z);
             break;
         case 3:
-            snprintf(mensajecompleto,100,"Tarjeta amarilla para %d del equipo %c",y,equipo1);
+            snprintf(header,100,"Tarjeta amarilla para %d del equipo %c",y,equipo1);
             break;
         case 4:
-            snprintf(mensajecompleto,100,"Tarjeta roja para %d del equipo %c",y,equipo1);
+            snprintf(header,100,"Tarjeta roja para %d del equipo %c",y,equipo1);
             break;
         case 5:
-            snprintf(mensajecompleto,100,"Tarjeta amarilla para %d del equipo %c",y,equipo2);
+            snprintf(header,100,"Tarjeta amarilla para %d del equipo %c",y,equipo2);
             break;
         case 6:
-            snprintf(mensajecompleto,100,"Tarjeta roja para %d del equipo %c",y,equipo2);
+            snprintf(header,100,"Tarjeta roja para %d del equipo %c",y,equipo2);
             break;
     }
 
