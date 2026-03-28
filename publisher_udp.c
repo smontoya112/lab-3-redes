@@ -74,6 +74,9 @@ int main(){
             return 1;
         }
 
+        char datagrama[200];
+        snprintf(datagrama, sizeof(datagrama), "PUB|%c|%c|%s", equipo1, equipo2, mensaje);
+
         int enviado = syscall (
             SYS_sendto,
             sock,
