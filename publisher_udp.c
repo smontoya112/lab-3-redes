@@ -3,7 +3,6 @@
 #include<stdlib.h>
 #include<time.h>
 #include<sys/syscall.h>
-#include<sys/socket.h>
 #include<netinet/in.h>
 #include<unistd.h>
 #include<arpa/inet.h>
@@ -40,6 +39,9 @@ char* creadorMensaje(char equipo1, char equipo2){
         case 6:
             snprintf(mensajeCompleto, 100, "Tarjeta roja para %d del equipo %c\n", y, equipo2);
             break;
+        default:
+            snprintf(mensajeCompleto, 100, "Evento no identificado\n");
+            break;
     }
 
     return mensajeCompleto;
@@ -54,19 +56,20 @@ int main(){
 
     scanf(" %c %c", &equipo1, &equipo2);
 
-    int sock;
-    sock = syscall(SYS_socket, AF_INET, SOCK_DGRAM, 0);
+    int num_mensajes = rand() % 11 + 10;
+    int sock = syscall(SYS_socket, 2, 2, 0);
     if (sock < 0){
         perror("Error al crear socket");
         return 1;
     }
 
     struct sockaddr_in server_addr;
-    server_addr.sin_family = AF_INET;
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = 2;
     server_addr.sin_port = htons(8080);
     server_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-    for(int i = 0; i<10; i++){
+    for(int i = 0; i<num_mensajes; i++){
         char* mensaje = creadorMensaje(equipo1, equipo2);
         if(mensaje == NULL){
             perror("Error al crear mensaje");
@@ -80,10 +83,10 @@ int main(){
         int enviado = syscall (
             SYS_sendto,
             sock,
-            mensaje,
-            strlen(mensaje),
+            datagrama,
+            strlen(datagrama),
             0,
-            (struct sockaddr *)&server_addr,
+            &server_addr,
             sizeof(server_addr)
         );
 
