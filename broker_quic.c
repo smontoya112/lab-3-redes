@@ -11,11 +11,13 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
+
 #define MAX_CLIENTES    40
 #define MAX_PARTIDOS    50
 #define PARTIDO_LEN     10
 #define BUF_SIZE        4096
 #define BROKER_PORT     8080
+
 
 #define PKT_HANDSHAKE     0x01
 #define PKT_HANDSHAKE_ACK 0x02
@@ -23,37 +25,37 @@
 #define PKT_ACK           0x04
 #define PKT_CLOSE         0x05
 
+
 #define CONN_ID_LEN   8
 #define SEQ_LEN       4
 #define TYPE_LEN      1
-#define IV_LEN        12   
-#define TAG_LEN       16   
+#define IV_LEN        12  
+#define TAG_LEN       16  
 #define KEY_LEN       32   
 
 
 #define HEADER_LEN  (CONN_ID_LEN + SEQ_LEN + TYPE_LEN + IV_LEN + TAG_LEN)
 
+
 #define RETRANSMIT_US  500000   
 #define MAX_RETRIES    5
 
-
 typedef struct {
     uint8_t  conn_id[CONN_ID_LEN]; 
-    uint32_t seq;                   
-    uint8_t  tipo;                 
-    uint8_t  iv[IV_LEN];        
+    uint32_t seq;                 
+    uint8_t  tipo;         
+    uint8_t  iv[IV_LEN];          
     uint8_t  tag[TAG_LEN];        
-    uint8_t  payload[BUF_SIZE];  
+    uint8_t  payload[BUF_SIZE];     
     int      payload_len;           
 } Paquete;
-
 
 typedef struct {
     uint8_t            conn_id[CONN_ID_LEN];
     struct sockaddr_in addr;
     uint8_t            key[KEY_LEN];
     int                handshake_ok;
-    int                tipo;          /* 1=subscriber, 2=publisher */
+    int                tipo;         
     int                id;
     char               partidos[MAX_PARTIDOS][PARTIDO_LEN];
     int                num_partidos;
@@ -105,7 +107,7 @@ static int descifrar(const uint8_t *key, const uint8_t *iv,
     rv = EVP_DecryptFinal_ex(ctx, plain + len, &len);
     EVP_CIPHER_CTX_free(ctx);
 
-    if (rv <= 0) return -1; 
+    if (rv <= 0) return -1;  
     plain_len += len;
     return plain_len;
 }
@@ -114,7 +116,7 @@ static int descifrar(const uint8_t *key, const uint8_t *iv,
 static int serializar(const Paquete *pkt, uint8_t *buf) {
     int pos = 0;
     memcpy(buf + pos, pkt->conn_id, CONN_ID_LEN); pos += CONN_ID_LEN;
-   
+
     buf[pos++] = (pkt->seq >> 24) & 0xFF;
     buf[pos++] = (pkt->seq >> 16) & 0xFF;
     buf[pos++] = (pkt->seq >>  8) & 0xFF;
@@ -150,6 +152,7 @@ static void enviar_paquete(Cliente *c, uint8_t tipo, uint32_t seq,
     pkt.seq  = seq;
     pkt.tipo = tipo;
 
+  
     RAND_bytes(pkt.iv, IV_LEN);
 
     if (payload && payload_len > 0) {
@@ -197,12 +200,12 @@ static int buscar_cliente_por_conn_id(const uint8_t *conn_id) {
 static void reenviar_a_subscribers(const char *partido, const char *mensaje) {
     for (int i = 0; i < MAX_CLIENTES; i++) {
         if (!clientes[i].activo)        continue;
-        if (clientes[i].tipo != 1)      continue;  
+        if (clientes[i].tipo != 1)      continue;  /* Solo subscribers */
         if (!clientes[i].handshake_ok)  continue;
 
         for (int j = 0; j < clientes[i].num_partidos; j++) {
             if (strcmp(clientes[i].partidos[j], partido) == 0) {
-             
+                
                 enviar_paquete(&clientes[i], PKT_DATA, 0,
                                mensaje, strlen(mensaje));
                 break;
@@ -210,6 +213,7 @@ static void reenviar_a_subscribers(const char *partido, const char *mensaje) {
         }
     }
 }
+
 
 static void procesar_mensaje(Cliente *c, char *texto) {
     if (strncmp(texto, "SUB|", 4) == 0) {
@@ -242,7 +246,7 @@ static void procesar_mensaje(Cliente *c, char *texto) {
 
 
 static void procesar_handshake(struct sockaddr_in *addr, Paquete *pkt) {
-    
+  
     int slot = -1;
     for (int i = 0; i < MAX_CLIENTES; i++) {
         if (!clientes[i].activo) { slot = i; break; }
@@ -260,11 +264,9 @@ static void procesar_handshake(struct sockaddr_in *addr, Paquete *pkt) {
     c->handshake_ok = 0;
     c->esperado_seq = 1;
     memcpy(c->conn_id, pkt->conn_id, CONN_ID_LEN);
-
     if (pkt->payload_len >= KEY_LEN) {
         memcpy(c->key, pkt->payload, KEY_LEN);
     } else {
-      
         RAND_bytes(c->key, KEY_LEN);
     }
 
@@ -272,8 +274,16 @@ static void procesar_handshake(struct sockaddr_in *addr, Paquete *pkt) {
     printf("Nueva sesión QUIC-sim desde puerto %d (slot %d)\n",
            ntohs(addr->sin_port), slot);
 
-
-    enviar_paquete(c, PKT_HANDSHAKE_ACK, 0, "OK", 2);
+   
+    uint8_t ack_buf[HEADER_LEN];
+    int pos = 0;
+    memcpy(ack_buf + pos, c->conn_id, CONN_ID_LEN); pos += CONN_ID_LEN;
+    ack_buf[pos++] = 0; ack_buf[pos++] = 0;      
+    ack_buf[pos++] = 0; ack_buf[pos++] = 0;
+    ack_buf[pos++] = PKT_HANDSHAKE_ACK;
+    memset(ack_buf + pos, 0, IV_LEN + TAG_LEN);
+    sendto(sock_fd, ack_buf, HEADER_LEN, 0,
+           (struct sockaddr *)addr, sizeof(*addr));
 }
 
 
@@ -281,7 +291,7 @@ static void procesar_paquete_data(Cliente *c, Paquete *pkt) {
 
     enviar_ack(&c->addr, c->conn_id, pkt->seq);
 
-  
+   
     if (pkt->seq < c->esperado_seq) {
         printf("Paquete duplicado seq=%u, ignorando\n", pkt->seq);
         return;
@@ -289,11 +299,11 @@ static void procesar_paquete_data(Cliente *c, Paquete *pkt) {
     if (pkt->seq > c->esperado_seq) {
         printf("Paquete fuera de orden seq=%u (esperado %u)\n",
                pkt->seq, c->esperado_seq);
-    
+        
     }
     c->esperado_seq = pkt->seq + 1;
 
-
+   
     uint8_t plain[BUF_SIZE];
     int plain_len = descifrar(c->key, pkt->iv,
                                pkt->payload, pkt->payload_len,
@@ -304,6 +314,7 @@ static void procesar_paquete_data(Cliente *c, Paquete *pkt) {
     }
     plain[plain_len] = '\0';
 
+    
     if (c->buf_len + plain_len < BUF_SIZE - 1) {
         memcpy(c->read_buf + c->buf_len, plain, plain_len);
         c->buf_len += plain_len;
@@ -327,7 +338,6 @@ int main(void) {
     srand((unsigned int)time(NULL));
     memset(clientes, 0, sizeof(clientes));
 
-  
     sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock_fd < 0) { perror("socket"); return 1; }
 
@@ -372,10 +382,10 @@ int main(void) {
         switch (pkt.tipo) {
             case PKT_HANDSHAKE:
                 if (slot < 0) {
-                
+                    
                     procesar_handshake(&origen, &pkt);
                 } else {
-                   
+                    
                     enviar_paquete(&clientes[slot], PKT_HANDSHAKE_ACK, 0, "OK", 2);
                 }
                 break;
@@ -387,7 +397,7 @@ int main(void) {
                 break;
 
             case PKT_ACK:
-    
+                
                 if (slot >= 0)
                     printf("ACK recibido de cliente %d (seq=%u)\n",
                            clientes[slot].id, pkt.seq);

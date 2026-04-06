@@ -36,7 +36,7 @@ typedef struct {
     uint32_t           esperado_seq; 
 } SubCtx;
 
-/* ── Cifrado ── */
+
 static int cifrar(const uint8_t *key, const uint8_t *iv,
                   const uint8_t *plain, int plen,
                   uint8_t *cipher, uint8_t *tag) {
@@ -54,6 +54,7 @@ static int cifrar(const uint8_t *key, const uint8_t *iv,
     return clen;
 }
 
+
 static int descifrar(const uint8_t *key, const uint8_t *iv,
                      const uint8_t *cipher, int clen,
                      const uint8_t *tag, uint8_t *plain) {
@@ -70,6 +71,7 @@ static int descifrar(const uint8_t *key, const uint8_t *iv,
     if (rv <= 0) return -1;
     return plen + len;
 }
+
 
 static int serializar(const uint8_t *conn_id, uint32_t seq, uint8_t tipo,
                        const uint8_t *iv, const uint8_t *tag,
@@ -95,9 +97,13 @@ static int enviar_con_ack(SubCtx *ctx, uint8_t tipo,
     uint8_t buf[BUF_SIZE + HEADER_LEN];
     int buf_len;
 
-    RAND_bytes(iv, IV_LEN);
-
-    if (payload && plen > 0) {
+    if (tipo == PKT_HANDSHAKE) {
+       
+        buf_len = serializar(ctx->conn_id, ctx->seq, tipo,
+                              NULL, NULL,
+                              (const uint8_t *)payload, plen, buf);
+    } else if (payload && plen > 0) {
+        RAND_bytes(iv, IV_LEN);
         int clen = cifrar(ctx->key, iv,
                           (const uint8_t *)payload, plen,
                           cipher, tag);
@@ -161,7 +167,6 @@ static void enviar_ack_simple(SubCtx *ctx, uint32_t seq) {
 int main(void) {
     srand((unsigned int)time(NULL));
 
-
     printf("Ingrese su id de suscriptor: ");
     int id;
     scanf("%d", &id);
@@ -180,7 +185,7 @@ int main(void) {
         printf("Suscrito al partido: %s\n", partidos[i]);
     }
 
-    
+
     SubCtx ctx;
     ctx.seq          = 0;
     ctx.esperado_seq = 1;
@@ -196,6 +201,7 @@ int main(void) {
     ctx.broker_addr.sin_port        = htons(BROKER_PORT);
     ctx.broker_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
+
     printf("Realizando handshake QUIC-sim...\n");
     if (enviar_con_ack(&ctx, PKT_HANDSHAKE,
                         (char *)ctx.key, KEY_LEN) != 0) {
@@ -204,7 +210,6 @@ int main(void) {
     }
     printf("Handshake completado. Conexión cifrada.\n");
 
-    
     printf("Enviando suscripciones...\n");
     for (int i = 0; i < num_partidos; i++) {
         char linea[100];
@@ -214,7 +219,7 @@ int main(void) {
         }
     }
 
-  
+
     printf("\nEsperando eventos [QUIC-sim cifrado con AES-256-GCM]...\n");
 
     uint8_t recv_buf[BUF_SIZE + HEADER_LEN];
@@ -235,8 +240,6 @@ int main(void) {
         ssize_t n = recvfrom(ctx.sock_fd, recv_buf, sizeof(recv_buf), 0,
                              (struct sockaddr *)&origen, &olen);
         if (n < (ssize_t)HEADER_LEN) continue;
-
-       
         uint32_t r_seq  = ((uint32_t)recv_buf[CONN_ID_LEN    ] << 24)
                         | ((uint32_t)recv_buf[CONN_ID_LEN + 1] << 16)
                         | ((uint32_t)recv_buf[CONN_ID_LEN + 2] <<  8)
@@ -248,11 +251,8 @@ int main(void) {
         int      r_plen = (int)n - HEADER_LEN;
 
         if (r_tipo != PKT_DATA) continue;
-
-        
         enviar_ack_simple(&ctx, r_seq);
 
-        /* Verificar orden */
         if (r_seq < ctx.esperado_seq) {
             printf("[Duplicado descartado seq=%u]\n", r_seq);
             continue;
@@ -271,7 +271,6 @@ int main(void) {
         }
         plain[plain_len] = '\0';
 
-       
         if (acum_len + plain_len < BUF_SIZE - 1) {
             memcpy(acum_buf + acum_len, plain, plain_len);
             acum_len += plain_len;
