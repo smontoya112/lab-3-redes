@@ -24,17 +24,19 @@
 #define HEADER_LEN    (CONN_ID_LEN + 4 + 1 + IV_LEN + TAG_LEN)
 #define RETRANSMIT_US 500000
 #define MAX_RETRIES   5
+#define MAX_PARTIDOS  50
+#define PARTIDO_LEN   10
 
-/* ── Contexto del publisher ── */
 typedef struct {
     int                sock_fd;
     uint8_t            conn_id[CONN_ID_LEN];
     uint8_t            key[KEY_LEN];
     struct sockaddr_in broker_addr;
-    uint32_t           seq;          
-} PubCtx;
+    uint32_t           seq;
+    uint32_t           esperado_seq; 
+} SubCtx;
 
-/* ── Cifrado/descifrado (igual que broker) ── */
+/* ── Cifrado ── */
 static int cifrar(const uint8_t *key, const uint8_t *iv,
                   const uint8_t *plain, int plen,
                   uint8_t *cipher, uint8_t *tag) {
@@ -52,7 +54,23 @@ static int cifrar(const uint8_t *key, const uint8_t *iv,
     return clen;
 }
 
-/* ── Serialización ── */
+static int descifrar(const uint8_t *key, const uint8_t *iv,
+                     const uint8_t *cipher, int clen,
+                     const uint8_t *tag, uint8_t *plain) {
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    int len, plen, rv;
+    EVP_DecryptInit_ex(ctx, EVP_aes_256_gcm(), NULL, NULL, NULL);
+    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_IVLEN, IV_LEN, NULL);
+    EVP_DecryptInit_ex(ctx, NULL, NULL, key, iv);
+    EVP_DecryptUpdate(ctx, plain, &len, cipher, clen);
+    plen = len;
+    EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_SET_TAG, TAG_LEN, (void *)tag);
+    rv = EVP_DecryptFinal_ex(ctx, plain + len, &len);
+    EVP_CIPHER_CTX_free(ctx);
+    if (rv <= 0) return -1;
+    return plen + len;
+}
+
 static int serializar(const uint8_t *conn_id, uint32_t seq, uint8_t tipo,
                        const uint8_t *iv, const uint8_t *tag,
                        const uint8_t *payload, int plen, uint8_t *buf) {
@@ -63,19 +81,17 @@ static int serializar(const uint8_t *conn_id, uint32_t seq, uint8_t tipo,
     buf[pos++] = (seq >>  8) & 0xFF;
     buf[pos++] = (seq      ) & 0xFF;
     buf[pos++] = tipo;
-    if (iv)      { memcpy(buf + pos, iv,  IV_LEN);  pos += IV_LEN;  }
-    else         { memset(buf + pos, 0,   IV_LEN);  pos += IV_LEN;  }
-    if (tag)     { memcpy(buf + pos, tag, TAG_LEN); pos += TAG_LEN; }
-    else         { memset(buf + pos, 0,   TAG_LEN); pos += TAG_LEN; }
-    if (payload && plen > 0) { memcpy(buf + pos, payload, plen); pos += plen; }
+    if (iv)  { memcpy(buf+pos, iv,  IV_LEN);  pos += IV_LEN;  }
+    else     { memset(buf+pos, 0,   IV_LEN);  pos += IV_LEN;  }
+    if (tag) { memcpy(buf+pos, tag, TAG_LEN); pos += TAG_LEN; }
+    else     { memset(buf+pos, 0,   TAG_LEN); pos += TAG_LEN; }
+    if (payload && plen > 0) { memcpy(buf+pos, payload, plen); pos += plen; }
     return pos;
 }
 
-
-static int enviar_con_ack(PubCtx *ctx, uint8_t tipo,
+static int enviar_con_ack(SubCtx *ctx, uint8_t tipo,
                            const char *payload, int plen) {
-    uint8_t iv[IV_LEN], tag[TAG_LEN];
-    uint8_t cipher[BUF_SIZE];
+    uint8_t iv[IV_LEN], tag[TAG_LEN], cipher[BUF_SIZE];
     uint8_t buf[BUF_SIZE + HEADER_LEN];
     int buf_len;
 
@@ -95,24 +111,21 @@ static int enviar_con_ack(PubCtx *ctx, uint8_t tipo,
     uint32_t seq_enviado = ctx->seq;
 
     for (int intento = 0; intento < MAX_RETRIES; intento++) {
-        /* Enviar paquete */
         sendto(ctx->sock_fd, buf, buf_len, 0,
                (struct sockaddr *)&ctx->broker_addr,
                sizeof(ctx->broker_addr));
 
-        /* Esperar ACK con timeout de 500ms */
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(ctx->sock_fd, &readfds);
         struct timeval tv = { .tv_sec = 0, .tv_usec = RETRANSMIT_US };
 
         if (select(ctx->sock_fd + 1, &readfds, NULL, NULL, &tv) <= 0) {
-            printf("Timeout esperando ACK seq=%u, reintento %d/%d\n",
+            printf("Timeout ACK seq=%u, reintento %d/%d\n",
                    seq_enviado, intento + 1, MAX_RETRIES);
-            continue;  /* Retransmitir */
+            continue;
         }
 
-        /* Recibir respuesta */
         uint8_t recv_buf[HEADER_LEN + 64];
         struct sockaddr_in origen;
         socklen_t olen = sizeof(origen);
@@ -120,7 +133,6 @@ static int enviar_con_ack(PubCtx *ctx, uint8_t tipo,
                              (struct sockaddr *)&origen, &olen);
         if (n < (ssize_t)HEADER_LEN) continue;
 
-        /* Extraer tipo y seq del paquete recibido */
         uint8_t  r_tipo = recv_buf[CONN_ID_LEN + 4];
         uint32_t r_seq  = ((uint32_t)recv_buf[CONN_ID_LEN    ] << 24)
                         | ((uint32_t)recv_buf[CONN_ID_LEN + 1] << 16)
@@ -129,48 +141,53 @@ static int enviar_con_ack(PubCtx *ctx, uint8_t tipo,
 
         if ((r_tipo == PKT_ACK || r_tipo == PKT_HANDSHAKE_ACK)
             && r_seq == seq_enviado) {
-            ctx->seq++;  /* Avanzar número de secuencia */
-            return 0;    /* ACK recibido correctamente */
+            ctx->seq++;
+            return 0;
         }
     }
-
-    fprintf(stderr, "No se recibió ACK para seq=%u tras %d intentos\n",
-            seq_enviado, MAX_RETRIES);
     return -1;
 }
 
 
-
-static char *creadorMensaje(char e1, char e2) {
-    char *msg = malloc(200);
-    int x = rand() % 7, y = rand() % 20 + 1, z = rand() % 20 + 1;
-    switch (x) {
-        case 0: snprintf(msg, 200, "Gol de %c al equipo %c", e1, e2); break;
-        case 1: snprintf(msg, 200, "Gol de %c al equipo %c", e2, e1); break;
-        case 2: snprintf(msg, 200, "Cambio: jugador %d entra por %d", y, z); break;
-        case 3: snprintf(msg, 200, "Tarjeta amarilla para %d del equipo %c", y, e1); break;
-        case 4: snprintf(msg, 200, "Tarjeta roja para %d del equipo %c",    y, e1); break;
-        case 5: snprintf(msg, 200, "Tarjeta amarilla para %d del equipo %c", y, e2); break;
-        case 6: snprintf(msg, 200, "Tarjeta roja para %d del equipo %c",    y, e2); break;
-    }
-    return msg;
+static void enviar_ack_simple(SubCtx *ctx, uint32_t seq) {
+    uint8_t buf[HEADER_LEN];
+    serializar(ctx->conn_id, seq, PKT_ACK,
+               NULL, NULL, NULL, 0, buf);
+    sendto(ctx->sock_fd, buf, HEADER_LEN, 0,
+           (struct sockaddr *)&ctx->broker_addr,
+           sizeof(ctx->broker_addr));
 }
 
 int main(void) {
     srand((unsigned int)time(NULL));
 
-    printf("Ingrese los equipos que se enfrentan: ");
-    char e1, e2;
-    scanf(" %c %c", &e1, &e2);
-    int num_mensajes = rand() % 10 + 1;
 
-    /* ── Inicializar contexto ── */
-    PubCtx ctx;
-    ctx.seq = 0;
+    printf("Ingrese su id de suscriptor: ");
+    int id;
+    scanf("%d", &id);
+
+    printf("Ingrese el numero de partidos a los que se va a suscribir: ");
+    int num_partidos;
+    scanf("%d", &num_partidos);
+    if (num_partidos > MAX_PARTIDOS) num_partidos = MAX_PARTIDOS;
+
+    char partidos[MAX_PARTIDOS][PARTIDO_LEN];
+    getchar();
+    printf("Ingrese los partidos (ej: AB):\n");
+    for (int i = 0; i < num_partidos; i++) {
+        fgets(partidos[i], PARTIDO_LEN, stdin);
+        partidos[i][strcspn(partidos[i], "\n")] = '\0';
+        printf("Suscrito al partido: %s\n", partidos[i]);
+    }
+
+    
+    SubCtx ctx;
+    ctx.seq          = 0;
+    ctx.esperado_seq = 1;
+
     ctx.sock_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (ctx.sock_fd < 0) { perror("socket"); return 1; }
 
-    /* Generar Connection ID y clave AES aleatorios */
     RAND_bytes(ctx.conn_id, CONN_ID_LEN);
     RAND_bytes(ctx.key, KEY_LEN);
 
@@ -179,46 +196,100 @@ int main(void) {
     ctx.broker_addr.sin_port        = htons(BROKER_PORT);
     ctx.broker_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-
-    printf("Realizando handshake QUIC-sim con el broker...\n");
-    uint8_t handshake_payload[KEY_LEN + CONN_ID_LEN];
-    memcpy(handshake_payload, ctx.key, KEY_LEN);
-
+    printf("Realizando handshake QUIC-sim...\n");
     if (enviar_con_ack(&ctx, PKT_HANDSHAKE,
-                        (char *)handshake_payload, KEY_LEN) != 0) {
+                        (char *)ctx.key, KEY_LEN) != 0) {
         fprintf(stderr, "Handshake fallido\n");
         return 1;
     }
-    printf("Handshake completado. Conexión cifrada establecida.\n");
+    printf("Handshake completado. Conexión cifrada.\n");
 
-    printf("Enviando %d mensajes sobre partido %c%c\n", num_mensajes, e1, e2);
-
-    /* ── Enviar mensajes cifrados ── */
-    for (int i = 0; i < num_mensajes; i++) {
-        char *evento = creadorMensaje(e1, e2);
-
-        /* Formato: "PUB|partido|evento\n" */
-        char linea[300];
-        snprintf(linea, sizeof(linea), "PUB|%c%c|%s\n", e1, e2, evento);
-
+    
+    printf("Enviando suscripciones...\n");
+    for (int i = 0; i < num_partidos; i++) {
+        char linea[100];
+        snprintf(linea, sizeof(linea), "SUB|%d|%s\n", id, partidos[i]);
         if (enviar_con_ack(&ctx, PKT_DATA, linea, strlen(linea)) == 0) {
-            printf("Mensaje enviado y confirmado %d: %s", i + 1, linea);
-        } else {
-            printf("Mensaje %d perdido definitivamente: %s", i + 1, linea);
+            printf("Suscripcion confirmada: %s", linea);
         }
-
-        free(evento);
-        usleep(50000);  /* 50ms entre mensajes */
     }
 
-    /* ── Cerrar conexión ── */
-    uint8_t buf[HEADER_LEN];
-    serializar(ctx.conn_id, ctx.seq, PKT_CLOSE,
-               NULL, NULL, NULL, 0, buf);
-    sendto(ctx.sock_fd, buf, HEADER_LEN, 0,
-           (struct sockaddr *)&ctx.broker_addr, sizeof(ctx.broker_addr));
+  
+    printf("\nEsperando eventos [QUIC-sim cifrado con AES-256-GCM]...\n");
 
-    printf("Publisher QUIC-sim finalizado.\n");
+    uint8_t recv_buf[BUF_SIZE + HEADER_LEN];
+    char    acum_buf[BUF_SIZE];
+    int     acum_len = 0;
+
+    while (1) {
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(ctx.sock_fd, &readfds);
+        struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+
+        if (select(ctx.sock_fd + 1, &readfds, NULL, NULL, &tv) <= 0)
+            continue;
+
+        struct sockaddr_in origen;
+        socklen_t olen = sizeof(origen);
+        ssize_t n = recvfrom(ctx.sock_fd, recv_buf, sizeof(recv_buf), 0,
+                             (struct sockaddr *)&origen, &olen);
+        if (n < (ssize_t)HEADER_LEN) continue;
+
+       
+        uint32_t r_seq  = ((uint32_t)recv_buf[CONN_ID_LEN    ] << 24)
+                        | ((uint32_t)recv_buf[CONN_ID_LEN + 1] << 16)
+                        | ((uint32_t)recv_buf[CONN_ID_LEN + 2] <<  8)
+                        |  (uint32_t)recv_buf[CONN_ID_LEN + 3];
+        uint8_t  r_tipo = recv_buf[CONN_ID_LEN + 4];
+        uint8_t *r_iv   = recv_buf + CONN_ID_LEN + 4 + 1;
+        uint8_t *r_tag  = r_iv + IV_LEN;
+        uint8_t *r_pay  = r_tag + TAG_LEN;
+        int      r_plen = (int)n - HEADER_LEN;
+
+        if (r_tipo != PKT_DATA) continue;
+
+        
+        enviar_ack_simple(&ctx, r_seq);
+
+        /* Verificar orden */
+        if (r_seq < ctx.esperado_seq) {
+            printf("[Duplicado descartado seq=%u]\n", r_seq);
+            continue;
+        }
+        if (r_seq > ctx.esperado_seq) {
+            printf("[Advertencia: paquete fuera de orden seq=%u esperado=%u]\n",
+                   r_seq, ctx.esperado_seq);
+        }
+        ctx.esperado_seq = r_seq + 1;
+
+        uint8_t plain[BUF_SIZE];
+        int plain_len = descifrar(ctx.key, r_iv, r_pay, r_plen, r_tag, plain);
+        if (plain_len < 0) {
+            fprintf(stderr, "[Error: autenticación AES-GCM fallida]\n");
+            continue;
+        }
+        plain[plain_len] = '\0';
+
+       
+        if (acum_len + plain_len < BUF_SIZE - 1) {
+            memcpy(acum_buf + acum_len, plain, plain_len);
+            acum_len += plain_len;
+            acum_buf[acum_len] = '\0';
+        }
+
+        char *pos = acum_buf, *fin;
+        while ((fin = strchr(pos, '\n')) != NULL) {
+            *fin = '\0';
+            if (strlen(pos) > 0)
+                printf("Evento recibido [AES-GCM]: %s\n", pos);
+            pos = fin + 1;
+        }
+        int resto = acum_len - (pos - acum_buf);
+        if (resto > 0) memmove(acum_buf, pos, resto);
+        acum_len = resto;
+    }
+
     close(ctx.sock_fd);
     return 0;
 }
