@@ -254,7 +254,7 @@ int main(void) {
         enviar_ack_simple(&ctx, r_seq);
 
         if (r_seq < ctx.esperado_seq) {
-            printf("[Duplicado descartado seq=%u]\n", r_seq);
+            printf("[Duplicado descartado seq=%u, esperado %u]\n", r_seq, ctx.esperado_seq);
             continue;
         }
         if (r_seq > ctx.esperado_seq) {
@@ -281,7 +281,7 @@ int main(void) {
         while ((fin = strchr(pos, '\n')) != NULL) {
             *fin = '\0';
             if (strlen(pos) > 0)
-                printf("Evento recibido [AES-GCM]: %s\n", pos);
+                printf("Evento recibido (seq=%u) [AES-GCM]: %s\n", r_seq, pos);
             pos = fin + 1;
         }
         int resto = acum_len - (pos - acum_buf);

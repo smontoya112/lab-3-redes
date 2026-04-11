@@ -61,6 +61,7 @@ typedef struct {
     int                num_partidos;
     int                activo;
     uint32_t           esperado_seq;
+    uint32_t           seq_envio;      /* Seq para reenviar mensajes a este cliente */
     char               read_buf[BUF_SIZE];
     int                buf_len;
 } Cliente;
@@ -205,9 +206,12 @@ static void reenviar_a_subscribers(const char *partido, const char *mensaje) {
 
         for (int j = 0; j < clientes[i].num_partidos; j++) {
             if (strcmp(clientes[i].partidos[j], partido) == 0) {
-                
-                enviar_paquete(&clientes[i], PKT_DATA, 0,
+                /* Incrementar seq antes de enviar */
+                clientes[i].seq_envio++;
+                enviar_paquete(&clientes[i], PKT_DATA, clientes[i].seq_envio,
                                mensaje, strlen(mensaje));
+                printf("  → Enviado a Subscriber %d con seq=%u\n",
+                       clientes[i].id, clientes[i].seq_envio);
                 break;
             }
         }
@@ -263,6 +267,7 @@ static void procesar_handshake(struct sockaddr_in *addr, Paquete *pkt) {
     c->id           = -1;
     c->handshake_ok = 0;
     c->esperado_seq = 1;
+    c->seq_envio    = 0;    /* Comienza en 0, se incrementa con cada reenvío */
     memcpy(c->conn_id, pkt->conn_id, CONN_ID_LEN);
     if (pkt->payload_len >= KEY_LEN) {
         memcpy(c->key, pkt->payload, KEY_LEN);
@@ -393,6 +398,10 @@ int main(void) {
             case PKT_DATA:
                 if (slot >= 0 && clientes[slot].handshake_ok) {
                     procesar_paquete_data(&clientes[slot], &pkt);
+                    /* Enviar ACK de vuelta al publisher para confirmar recepción */
+                    if (clientes[slot].tipo == 2) {
+                        enviar_ack(&clientes[slot].addr, clientes[slot].conn_id, pkt.seq);
+                    }
                 }
                 break;
 

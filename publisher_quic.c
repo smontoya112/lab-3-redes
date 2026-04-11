@@ -134,6 +134,7 @@ static int enviar_con_ack(PubCtx *ctx, uint8_t tipo,
 
         if ((r_tipo == PKT_ACK || r_tipo == PKT_HANDSHAKE_ACK)
             && r_seq == seq_enviado) {
+            printf("  ACK recibido para seq=%u\n", seq_enviado);
             ctx->seq++;  
             return 0;   
         }
@@ -203,9 +204,9 @@ int main(void) {
         snprintf(linea, sizeof(linea), "PUB|%c%c|%s\n", e1, e2, evento);
 
         if (enviar_con_ack(&ctx, PKT_DATA, linea, strlen(linea)) == 0) {
-            printf("Mensaje enviado y confirmado %d: %s", i + 1, linea);
+            printf("Mensaje enviado y confirmado %d (seq=%u): %s", i + 1, ctx.seq - 1, linea);
         } else {
-            printf("Mensaje %d perdido definitivamente: %s", i + 1, linea);
+            printf("Mensaje %d perdido definitivamente (seq=%u): %s", i + 1, ctx.seq, linea);
         }
 
         free(evento);
